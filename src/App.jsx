@@ -27,7 +27,7 @@ function createCustomPin(color, dayNum) {
 
 const DAY_COLORS = ['#10B981', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
 // Ensure you change this to your production backend URL once deployed.
-const BACKEND_URL = 'http://localhost:3000';
+const BACKEND_URL = 'https://ollandia-roamy.onrender.com';
 
 function MapBoundsFormatter({ places }) {
   const map = useMap();
