@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { places as initialPlaces, categories as availableVibes } from './data/netherlands';
-import { MapPin, Star, Plus, Minus, Compass, ArrowRight, Link as LinkIcon, Sparkles, PlusCircle, Trash2, X, ChevronLeft, Map as MapIcon, ImageIcon } from 'lucide-react';
+import { MapPin, Star, Plus, Minus, Compass, ArrowRight, Link as LinkIcon, Sparkles, PlusCircle, Trash2, X, ChevronLeft, Map as MapIcon, LogIn, LogOut, Save, User as UserIcon } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import axios from 'axios';
+import { supabase } from './supabaseClient';
 
 const BrandIcon = L.divIcon({
   className: 'custom-pin-brand',
@@ -26,7 +27,6 @@ function createCustomPin(color, dayNum) {
 }
 
 const DAY_COLORS = ['#10B981', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#EC4899', '#14B8A6'];
-// Ensure you change this to your production backend URL once deployed.
 const BACKEND_URL = 'https://ollandia-roamy.onrender.com';
 
 function MapBoundsFormatter({ places }) {
@@ -61,7 +61,7 @@ export default function App() {
   const [selectedVibes, setSelectedVibes] = useState([]);
   const [selectedCity, setSelectedCity] = useState('');
 
-  // Other UI States
+  // UI States
   const [newListName, setNewListName] = useState('');
   const [linkInput, setLinkInput] = useState('');
   const [isImporting, setIsImporting] = useState(false);
@@ -69,13 +69,129 @@ export default function App() {
   const [tripDurationDays, setTripDurationDays] = useState(3);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // AUTH STATES
+  const [session, setSession] = useState(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [mySavedTrips, setMySavedTrips] = useState([]);
+  const [isSavingTrip, setIsSavingTrip] = useState(false);
+
   useEffect(() => { localStorage.setItem('roamy_places', JSON.stringify(places)); }, [places]);
   useEffect(() => { localStorage.setItem('roamy_lists', JSON.stringify(lists)); }, [lists]);
   useEffect(() => { localStorage.setItem('roamy_activeListId', activeListId); }, [activeListId]);
   useEffect(() => { localStorage.setItem('roamy_smartItineraries', JSON.stringify(smartItineraries)); }, [smartItineraries]);
 
+  // Handle Auth Session
+  useEffect(() => {
+    if(!supabase) return;
+    
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch My Trips when opening step 4
+  useEffect(() => {
+    if(wizardStep === 4 && session && supabase) {
+      fetchMyTrips();
+    }
+  }, [wizardStep, session]);
+
+  const fetchMyTrips = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('saved_trips')
+        .select('*')
+        .eq('user_id', session.user.id)
+        .order('created_at', { ascending: false });
+      
+      if(error) throw error;
+      setMySavedTrips(data || []);
+    } catch(err) {
+      console.error(err);
+      // Fail silently if table doesnt exist yet, so we don't spam user
+    }
+  };
+
   const activeList = lists.find(l => l.id === activeListId);
   const currentItinerary = smartItineraries[activeListId];
+
+  // Auth Functions
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    if(!supabase) {
+      setAuthError("Supabase is not configured properly. Check .env!");
+      return;
+    }
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      let error = null;
+      if (authMode === 'login') {
+        const res = await supabase.auth.signInWithPassword({ email, password });
+        error = res.error;
+      } else {
+        const res = await supabase.auth.signUp({ email, password });
+        error = res.error;
+        if(!error && res.data?.user?.identities?.length === 0) {
+           error = { message: "Account exists. Please sign in." };
+        } else if(!error && res.data?.session == null) {
+           error = { message: "Registration successful. Please check your email to verify." };
+        }
+      }
+      
+      if (error) throw error;
+      setIsAuthModalOpen(false);
+    } catch (err) {
+      setAuthError(err.message || 'Authentication failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if(supabase) await supabase.auth.signOut();
+    setWizardStep(1);
+  };
+
+  // Cloud Save functionality
+  const handleSaveTripToCloud = async () => {
+    if (!session) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+    if (!supabase) return alert("Database is not connected.");
+    if (!currentItinerary) return;
+
+    setIsSavingTrip(true);
+    try {
+      const tripData = {
+        user_id: session.user.id,
+        list_name: activeList.name,
+        itinerary_data: currentItinerary
+      };
+      const { error } = await supabase.from('saved_trips').insert([tripData]);
+      if (error) throw error;
+      alert("Successfully saved to cloud! You can view it in 'My Trips'.");
+    } catch (err) {
+      console.error(err);
+      alert("Failed to save. Have you created the 'saved_trips' table in Supabase via SQL?");
+    } finally {
+      setIsSavingTrip(false);
+    }
+  };
 
   // Wizard Logics
   const toggleVibe = (vibe) => {
@@ -84,9 +200,21 @@ export default function App() {
   };
 
   const getRecommendedCities = () => {
+    const REAL_CITY_IMAGES = {
+      "Amsterdam": "/cities/amsterdam.png",
+      "Rotterdam": "/cities/rotterdam.png",
+      "Utrecht": "/cities/utrecht.png",
+      "The Hague": "/cities/hague.png",
+      "Leiden": "/cities/leiden.png",
+      "Giethoorn": "/cities/giethoorn.png"
+    };
+
     const cityMap = {};
     places.forEach(p => {
-      if(!cityMap[p.city]) cityMap[p.city] = { name: p.city, score: 0, image: `https://placehold.co/600x400/11141B/FF6B00?text=${encodeURIComponent(p.city)}`, placeCount: 0 };
+      if(!cityMap[p.city]) {
+         const fallback = `https://placehold.co/600x400/11141B/FF6B00?text=${encodeURIComponent(p.city)}`;
+         cityMap[p.city] = { name: p.city, score: 0, image: REAL_CITY_IMAGES[p.city] || fallback, placeCount: 0 };
+      }
       cityMap[p.city].placeCount++;
       if (selectedVibes.includes(p.category)) cityMap[p.city].score += 10;
     });
@@ -102,16 +230,6 @@ export default function App() {
   const handleCitySelect = (cityName) => {
     setSelectedCity(cityName);
     setWizardStep(3);
-  };
-
-  // Actions
-  const handleCreateList = (e) => {
-    e.preventDefault();
-    if(newListName.trim() === '') return;
-    const newList = { id: Date.now().toString(), name: newListName.trim(), items: [] };
-    setLists([...lists, newList]);
-    setActiveListId(newList.id);
-    setNewListName('');
   };
 
   const addToList = (place) => {
@@ -192,31 +310,48 @@ export default function App() {
       {/* Header */}
       <header className="header">
         <div className="container header-content">
-          <div className="logo">
+          <div className="logo" onClick={() => setWizardStep(1)} style={{cursor: 'pointer'}}>
             <Compass size={28} color="#FF6B00" />
             The Netherlands<span>Diaries</span>
           </div>
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-            {wizardStep > 1 && (
+            {wizardStep > 1 && wizardStep !== 4 && (
               <button className="btn btn-secondary" onClick={() => setWizardStep(1)}>
                 <ChevronLeft size={16} /> Home
               </button>
             )}
             
-            <button className="btn btn-secondary" onClick={() => { localStorage.clear(); window.location.reload(); }}>Reset Data</button>
+            <button className="btn btn-secondary" onClick={() => { 
+                localStorage.removeItem('roamy_places'); 
+                localStorage.removeItem('roamy_lists'); 
+                localStorage.removeItem('roamy_activeListId'); 
+                localStorage.removeItem('roamy_smartItineraries'); 
+                window.location.reload(); 
+            }}>Reset Trip Data</button>
             
+            {session ? (
+               <>
+                 <button className="btn" onClick={() => setWizardStep(4)} style={{ background: wizardStep === 4 ? 'rgba(255, 107, 0, 0.2)' : 'var(--card-bg)', border: '1px solid #FF6B00', color: '#FF6B00'}}>
+                   <UserIcon size={16}/> My Trips
+                 </button>
+                 <button className="btn btn-secondary" onClick={handleSignOut}><LogOut size={16}/> Log Out</button>
+               </>
+            ) : (
+               <button className="btn" onClick={() => setIsAuthModalOpen(true)}><LogIn size={16}/> Sign In</button>
+            )}
+
           </div>
         </div>
       </header>
 
       {/* Hero */}
-      <section className="hero" style={{ height: wizardStep === 3 ? '300px' : '500px', transition: 'height 0.4s ease' }}>
-        <img src="/hero_amsterdam_canal_1776289628576.png" alt="Amsterdam Canal" className="hero-img" />
+      <section className="hero" style={{ height: wizardStep >= 3 ? '300px' : '500px', transition: 'height 0.4s ease' }}>
+        <img src="/cities/amsterdam.png" alt="Hero Background" className="hero-img" />
         <div className="hero-overlay"></div>
         <div className="hero-content">
-          <h1>{wizardStep === 3 ? `Discover ${selectedCity}` : "Design the Perfect Trip"}</h1>
+          <h1>{wizardStep === 3 ? `Discover ${selectedCity}` : wizardStep === 4 ? 'My Saved Cloud Trips' : "Design the Perfect Trip"}</h1>
           <p>
-            {wizardStep === 3 ? "Add places to your itinerary to let AI build your schedule." : "Avoid the crowds. Find your vibe. Let AI build the ultimate Netherlands itinerary."}
+            {wizardStep === 3 ? "Add places to your itinerary to let AI build your schedule." : wizardStep === 4 ? "View your past AI itineraries securely loaded from the cloud." : "Avoid the crowds. Find your vibe. Let AI build the ultimate Netherlands itinerary."}
           </p>
           {wizardStep === 3 && (
             <form className="link-import-form" onSubmit={handleLinkImport} style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem'}}>
@@ -358,6 +493,45 @@ export default function App() {
             </div>
           )}
 
+          {/* WIZARD STEP 4: My Cloud Trips */}
+          {wizardStep === 4 && (
+            <div style={{ animation: 'fade-in 0.5s ease-out' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+                 <h2 style={{ fontSize: '2.5rem' }}>Cloud Stash</h2>
+              </div>
+              {mySavedTrips.length === 0 ? (
+                <div className="empty-state">
+                  <Compass size={48} className="empty-icon" />
+                  <p>You have no saved trips. Generate and save one first!</p>
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '2rem' }}>
+                   {mySavedTrips.map(trip => (
+                     <div key={trip.id} style={{ background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: '16px', padding: '1.5rem', boxShadow: '0 8px 16px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '1rem'}}>
+                           <h3 style={{ fontSize: '1.5rem', margin: 0, color: 'white' }}>{trip.list_name}</h3>
+                           <span style={{ fontSize: '0.8rem', color: '#9CA3AF' }}>{new Date(trip.created_at).toLocaleDateString()}</span>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                           {trip.itinerary_data.map(day => (
+                             <div key={day.day} style={{ marginBottom: '1rem' }}>
+                                <strong style={{ color: '#FF6B00' }}>Day {day.day}:</strong> {day.theme}
+                                <ul style={{ margin: '0.25rem 0', paddingLeft: '1.25rem', color: '#D1D5DB', fontSize: '0.9rem' }}>
+                                   {day.placeIds.slice(0,3).map(pid => {
+                                      const p = places.find(x => x.id === pid);
+                                      return p ? <li key={pid}>{p.name}</li> : null;
+                                   })}
+                                </ul>
+                             </div>
+                           ))}
+                        </div>
+                     </div>
+                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
         </div>
 
         {/* Sidebar */}
@@ -377,14 +551,19 @@ export default function App() {
               
             </div>
 
-            <div style={{ paddingBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: '1rem', marginTop: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ fontSize: '1.2rem' }}>{activeList?.name} ({activeList?.items.length})</h3>
-              
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <button className="btn" onClick={() => setIsDurationModalOpen(true)} disabled={!activeList || activeList.items.length === 0 || isGenerating} style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', background: currentItinerary ? '#10B981' : '#222', border: '1px solid #444' }}>
-                  {isGenerating ? "Processing..." : currentItinerary ? <><Sparkles size={14}/> Saved AI Plan</> : <><Sparkles size={14}/> AI Itinerary</>}
-                </button>
+            <div style={{ paddingBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: '1rem', marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                 <h3 style={{ fontSize: '1.2rem' }}>{activeList?.name} ({activeList?.items.length})</h3>
+                 <button className="btn" onClick={() => setIsDurationModalOpen(true)} disabled={!activeList || activeList.items.length === 0 || isGenerating} style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', background: currentItinerary ? '#10B981' : '#222', border: '1px solid #444' }}>
+                   {isGenerating ? "Processing..." : currentItinerary ? <><Sparkles size={14}/> Saved AI Plan</> : <><Sparkles size={14}/> AI Itinerary</>}
+                 </button>
               </div>
+              
+              {currentItinerary && (
+                 <button className="btn" onClick={handleSaveTripToCloud} disabled={isSavingTrip} style={{ width: '100%', justifyContent: 'center', background: 'transparent', color: '#FF6B00', border: '1px solid #FF6B00' }}>
+                   <Save size={16} /> {isSavingTrip ? 'Saving...' : 'Save Trip to Cloud'}
+                 </button>
+              )}
             </div>
 
             <div className="itinerary-list">
@@ -398,7 +577,7 @@ export default function App() {
                   {currentItinerary.map((dayBlock, dayIndex) => {
                     const color = DAY_COLORS[dayIndex % DAY_COLORS.length];
                     return (
-                      <div key={dayBlock.day} style={{ marginBottom: '1.5rem', borderLeft: `4px solid ${color}`, paddingLeft: '1rem' }}>
+                      <div key={dayBlock.day} style={{ marginBottom: '1.5rem', borderLeft: `${color}`, paddingLeft: '1rem', borderLeftWidth: '4px', borderLeftStyle: 'solid' }}>
                         <div style={{ color: color, fontWeight: 'bold', fontSize: '1.1rem', marginBottom: '0.5rem' }}>Day {dayBlock.day}: {dayBlock.theme}</div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                           {dayBlock.placeIds.map(pid => {
@@ -439,6 +618,50 @@ export default function App() {
             <p style={{ color: '#9CA3AF', marginBottom: '1.5rem' }}>How many days are you staying? Our AI will organize the locations logically per day.</p>
             <input type="number" min="1" max="14" value={tripDurationDays} onChange={(e) => setTripDurationDays(Number(e.target.value))} style={{ width: '100%', padding: '0.75rem', borderRadius: '8px', border: '1px solid #FF6B00', background: '#222', color: 'white', fontSize: '1.2rem', marginBottom: '1.5rem', outline: 'none' }} />
             <button className="btn" style={{ width: '100%', justifyContent: 'center' }} onClick={handleGenerateItinerary}><Sparkles size={18} /> Generate Itinerary</button>
+          </div>
+        </div>
+      )}
+
+      {/* Auth Modal */}
+      {isAuthModalOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}}>
+          <div style={{ background: '#11141B', border: '1px solid rgba(255,255,255,0.1)', padding: '2.5rem', borderRadius: '16px', maxWidth: '400px', width: '90%', position: 'relative', boxShadow: '0 25px 50px rgba(0,0,0,0.6)' }}>
+            <button onClick={() => setIsAuthModalOpen(false)} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'transparent', border: 'none', color: '#9CA3AF', cursor: 'pointer' }}><X size={24} /></button>
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem' }}>
+               <Compass size={40} color="#FF6B00" />
+            </div>
+            <h2 style={{ marginBottom: '0.5rem', color: 'white', textAlign: 'center', fontSize: '2rem' }}>
+               {authMode === 'login' ? 'Welcome Back' : 'Create Account'}
+            </h2>
+            <p style={{ color: '#9CA3AF', marginBottom: '2rem', textAlign: 'center', fontSize: '0.9rem' }}>
+               {authMode === 'login' ? 'Sign in to save and access your AI itineraries' : 'Sign up to start saving your trips to the cloud'}
+            </p>
+            
+            {authError && <div style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#EF4444', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', fontSize: '0.9rem', border: '1px solid rgba(239, 68, 68, 0.2)' }}>{authError}</div>}
+            
+            <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
+               <div>
+                 <label style={{ display: 'block', color: '#D1D5DB', marginBottom: '0.5rem', fontSize: '0.9rem' }}>Email Address</label>
+                 <input type="email" required placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} style={{ width: '100%', padding: '0.9rem', borderRadius: '8px', border: '1px solid #4B5563', background: '#1F2937', color: 'white', outline: 'none' }} />
+               </div>
+               <div>
+                 <label style={{ display: 'block', color: '#D1D5DB', marginBottom: '0.5rem', fontSize: '0.9rem' }}>Password</label>
+                 <input type="password" required placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} style={{ width: '100%', padding: '0.9rem', borderRadius: '8px', border: '1px solid #4B5563', background: '#1F2937', color: 'white', outline: 'none' }} />
+               </div>
+               
+               <button type="submit" className="btn" disabled={authLoading} style={{ width: '100%', justifyContent: 'center', padding: '1rem', marginTop: '0.5rem', fontSize: '1.1rem' }}>
+                 {authLoading ? "Processing..." : authMode === 'login' ? 'Sign In' : 'Sign Up'}
+               </button>
+            </form>
+            
+            <div style={{ marginTop: '2rem', textAlign: 'center', color: '#9CA3AF', fontSize: '0.9rem' }}>
+               {authMode === 'login' ? "Don't have an account? " : "Already have an account? "}
+               <span 
+                 onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }} 
+                 style={{ color: '#FF6B00', cursor: 'pointer', fontWeight: 'bold' }}>
+                 {authMode === 'login' ? 'Sign up' : 'Sign in'}
+               </span>
+            </div>
           </div>
         </div>
       )}
