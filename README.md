@@ -29,7 +29,7 @@ Follow these instructions to get a local copy of the project up and running on y
 ### Installation
 
 1. Clone the repository:
-git clone https://github.com/pchrysostomou/ollandia-roamy.git
+git clone https://github.com/pchrysostomou/The-Netherlands-Diaries.git
 cd ollandia-roamy
 
 2. Install dependencies:
